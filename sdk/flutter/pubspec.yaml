@@ -1,0 +1,13 @@
+name: neppay_gateway
+description: NepPay Gateway SDK for Flutter — cross-platform checkout (Android, iOS, Web, Desktop).
+version: 0.1.0
+environment:
+  sdk: ^3.0.0
+  flutter: '>=3.10.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter

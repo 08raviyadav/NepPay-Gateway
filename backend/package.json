@@ -1,0 +1,1 @@
+{"description":"NepPay Gateway — independent cross-platform payment gateway scaffold (sandbox, mock adapters)","engines":{"node":">=18"},"license":"MIT","main":"server.js","name":"neppay-gateway","scripts":{"start":"node server.js","test":"node test.js"},"version":"0.1.0"}
