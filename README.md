@@ -73,6 +73,26 @@ Each QR returns a real EMVCo TLV payload (tag 01 = `11` static / `12` dynamic,
 CRC16 in tag 63) — the same format the NepPay app parses. Flutter SDK:
 `createQrCode()`, `getQrCode()`, `listQrCodes()`, `payWithQr()`.
 
+## Pay by username / phone number
+
+```bash
+# Register a payee (username + phone are both unique)
+curl -X POST localhost:8788/v1/users \
+  -H 'X-API-Key: pk_test_neppay_demo' -H 'Content-Type: application/json' \
+  -d '{"username":"maya.sharma","phone":"9841000002","displayName":"Maya Sharma"}'
+# Name inquiry first — see who you are paying before you send
+curl 'localhost:8788/v1/users/lookup?username=@maya.sharma' -H 'X-API-Key: pk_test_neppay_demo'
+# Pay them (free p2p transfer, no method needed)
+curl -X POST localhost:8788/v1/payments \
+  -H 'X-API-Key: pk_test_neppay_demo' -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: p2p-demo-001' \
+  -d '{"to":"@maya.sharma","amount":200}'
+# Or share the pay link: http://localhost:8788/pay/maya.sharma
+```
+
+Demo payees: `@himalayan`, `@maya.sharma`, `@sagar`. Flutter SDK:
+`registerUser()`, `lookupUser()`, `payTo()`.
+
 ## Test cards / failure cases
 
 - Amount `1313` always fails (mock `insufficient_funds`) — test your error UI.

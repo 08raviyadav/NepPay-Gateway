@@ -12,7 +12,7 @@ async function j(method, path, body, headers = {}) {
 }
 (async () => {
   const h = await j('GET', '/health'); check('health ok', h.body.ok === true);
-  const m = await j('GET', '/v1/methods'); check('7 methods listed', (m.body.methods || []).length === 7, JSON.stringify(m.body));
+  const m = await j('GET', '/v1/methods'); check('8 methods listed (incl. p2p)', (m.body.methods || []).length === 8 && (m.body.methods || []).some((x) => x.id === 'p2p' && x.feeRate === 0), JSON.stringify(m.body));
   const noKey = await fetch(BASE + '/v1/payments'); check('unauthenticated rejected', noKey.status === 401);
   const cs = await j('POST', '/v1/checkout-sessions', { amount: 500, orderId: 'ORDER-1', customer: { name: 'Test Buyer' } });
   check('checkout session created', cs.status === 201 && cs.body.id.startsWith('cs_') && cs.body.checkoutUrl.includes('/checkout/'), JSON.stringify(cs.body));
@@ -57,6 +57,34 @@ async function j(method, path, body, headers = {}) {
   check('static QR deactivated', deact.body.status === 'deactivated', JSON.stringify(deact.body));
   const qp3 = await j('POST', '/v1/payments', { qrCodeId: sq.body.id, amount: 10 }, { 'Idempotency-Key': 'test-qr-st3-' + Date.now() });
   check('deactivated QR cannot be paid', qp3.status === 400, JSON.stringify(qp3.body));
+
+  // --- Pay by unique username / phone number ---
+  const seed = await j('GET', '/v1/users/lookup?username=@maya.sharma');
+  check('seed payee lookup by username (masked phone)', seed.status === 200 && seed.body.displayName === 'Maya Sharma' && seed.body.phoneMasked === '98******02' && !JSON.stringify(seed.body).includes('9841000002'), JSON.stringify(seed.body));
+  const seedPhone = await j('GET', '/v1/users/lookup?phone=+9779841000002');
+  check('seed payee lookup by phone (+977 prefix)', seedPhone.body.username === 'maya.sharma', JSON.stringify(seedPhone.body));
+  const noUser = await j('GET', '/v1/users/lookup?username=@nobody123');
+  check('unknown username lookup 404s', noUser.status === 404, JSON.stringify(noUser.body));
+  const nu = await j('POST', '/v1/users', { username: 'Test.User1', phone: '9861234567', displayName: 'Test User' });
+  check('new payee registered, username lowercased', nu.status === 201 && nu.body.username === 'test.user1' && nu.body.payLink.includes('/pay/test.user1'), JSON.stringify(nu.body));
+  const dupU = await j('POST', '/v1/users', { username: '@TEST.user1', phone: '9871234567', displayName: 'Copy' });
+  check('duplicate username rejected (case-insensitive)', dupU.status === 409 && dupU.body.error.code === 'duplicate_username', JSON.stringify(dupU.body));
+  const dupP = await j('POST', '/v1/users', { username: 'otheruser', phone: '+9779861234567', displayName: 'Copy' });
+  check('duplicate phone rejected (+977 form)', dupP.status === 409 && dupP.body.error.code === 'duplicate_phone', JSON.stringify(dupP.body));
+  const badU = await j('POST', '/v1/users', { username: 'ab', phone: '9861234568', displayName: 'Short' });
+  check('short username rejected', badU.status === 400, JSON.stringify(badU.body));
+  const badP = await j('POST', '/v1/users', { username: 'goodname', phone: '12345', displayName: 'Bad' });
+  check('bad phone rejected', badP.status === 400, JSON.stringify(badP.body));
+  const pu = await j('POST', '/v1/payments', { to: '@maya.sharma', amount: 200 }, { 'Idempotency-Key': 'test-p2p-u-' + Date.now() });
+  check('pay by username succeeds, free, recipient named', pu.body.status === 'succeeded' && pu.body.method === 'p2p' && pu.body.fee === 0 && pu.body.recipient.displayName === 'Maya Sharma' && pu.body.recipient.username === 'maya.sharma', JSON.stringify(pu.body));
+  const pp = await j('POST', '/v1/payments', { recipientPhone: '9851000003', amount: 150 }, { 'Idempotency-Key': 'test-p2p-p-' + Date.now() });
+  check('pay by phone succeeds, recipient named', pp.body.status === 'succeeded' && pp.body.recipient.displayName === 'Sagar Thapa', JSON.stringify(pp.body));
+  const pUnknown = await j('POST', '/v1/payments', { to: '@ghost999', amount: 100 }, { 'Idempotency-Key': 'test-p2p-g-' + Date.now() });
+  check('pay to unknown username rejected', pUnknown.status === 400 && pUnknown.body.error.code === 'recipient_not_found', JSON.stringify(pUnknown.body));
+  const pNoAmt = await j('POST', '/v1/payments', { to: '@sagar' }, { 'Idempotency-Key': 'test-p2p-na-' + Date.now() });
+  check('pay by username without amount rejected', pNoAmt.status === 400, JSON.stringify(pNoAmt.body));
+  const link = await fetch(BASE + '/pay/@maya.sharma');
+  check('pay link page renders with name', link.status === 200 && (await link.text()).includes('Maya Sharma'));
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('FAIL test crashed', e); process.exit(1); });

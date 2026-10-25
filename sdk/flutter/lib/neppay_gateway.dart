@@ -154,6 +154,48 @@ class NepPayGatewayClient {
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
+  /// Register a payee: unique username + unique Nepal phone number.
+  Future<Map<String, dynamic>> registerUser({required String username, required String phone, required String displayName}) async {
+    final r = await http.post(
+      Uri.parse('$baseUrl/v1/users'),
+      headers: _headers,
+      body: jsonEncode({'username': username, 'phone': phone, 'displayName': displayName}),
+    );
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  /// Name inquiry — look a payee up by username (@maya.sharma) or phone
+  /// (9841000002 / +9779841000002) and show their name *before* paying.
+  /// Returns only a masked phone (98******01), never the full number.
+  Future<Map<String, dynamic>> lookupUser({String? username, String? phone}) async {
+    final q = username != null
+        ? 'username=${Uri.encodeComponent(username)}'
+        : 'phone=${Uri.encodeComponent(phone ?? '')}';
+    final r = await http.get(Uri.parse('$baseUrl/v1/users/lookup?$q'), headers: _headers);
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  Future<List<dynamic>> listUsers() async {
+    final r = await http.get(Uri.parse('$baseUrl/v1/users'), headers: _headers);
+    _throwIfError(r);
+    return (jsonDecode(r.body) as Map<String, dynamic>)['users'] as List;
+  }
+
+  /// Pay by username or phone. `to` is '@username' or a phone number.
+  /// Defaults to the free p2p method; the payment carries the recipient's
+  /// name so the confirm sheet can show who is being paid.
+  Future<Map<String, dynamic>> payTo({required String to, required double amount, String? idempotencyKey}) async {
+    final r = await http.post(
+      Uri.parse('$baseUrl/v1/payments'),
+      headers: {..._headers, 'Idempotency-Key': idempotencyKey ?? _newIdempotencyKey()},
+      body: jsonEncode({'to': to, 'amount': amount}),
+    );
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
   void _throwIfError(http.Response r) {
     if (r.statusCode >= 400) {
       final b = jsonDecode(r.body) as Map<String, dynamic>;

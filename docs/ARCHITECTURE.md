@@ -35,6 +35,15 @@ Merchant website / Android / iOS / Flutter app
    `{ ok, adapterRef }` / `{ ok:false, code, message }` shape.
 4. **Webhooks are signed.** Every event carries `sha256=` HMAC of the payload
    with `WEBHOOK_SECRET`. Merchants must verify it before trusting an event.
+6. **Payees are a directory, not a string.** Usernames and phone numbers
+   are unique keys in `db.users`, normalized on write (username lowercased,
+   `@` stripped; phone stripped of `+977`/spaces/dashes). Lookup
+   (`GET /v1/users/lookup`) is the name-inquiry step: it returns the display
+   name and a *masked* phone only, so a payer confirms the person before
+   sending. A `p2p` payment (method `p2p`, fee 0) resolves the recipient
+   first, then ledgers the net to `user:<username>:available` — not to the
+   merchant — and refunds reverse from there. V1 must verify ownership
+   (OTP on the phone + KYC) before a username/phone can receive real money.
 5. **QR codes are EMVCo, not pictures.** `POST /v1/qr-codes` builds a TLV
    payload (`buildEmvPayload` in `backend/server.js`, CRC16-CCITT in tag 63)
    that any EMVCo reader — including the NepPay app's `EmvQr.tryParse` —

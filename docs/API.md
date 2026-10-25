@@ -66,6 +66,40 @@ Open the QR's `displayUrl` (`/qr/:id`) in any browser to see the QR image and
 pay from the page. Errors: `qr_not_found`, `qr_not_active`, `qr_expired` (via
 status), `method_mismatch`, `amount_not_allowed`, `invalid_amount`.
 
+## Pay by username / phone number
+
+### `POST /v1/users`
+Register a payee: `{ "username": "maya.sharma", "phone": "9841000002",
+"displayName": "Maya Sharma" }`. Username is unique (case-insensitive,
+3-20 chars, `a-z 0-9 _ .`, a few reserved names blocked) and the phone is
+unique too (Nepal mobile, accepts `+977` prefix). Duplicates return `409`
+(`duplicate_username` / `duplicate_phone`); bad values return `400`
+(`invalid_username` / `invalid_phone` / `username_reserved`).
+→ `201 { "id": "usr_…", "username": "maya.sharma", "displayName": "Maya Sharma",
+"phoneMasked": "98******02", "payLink": "http://localhost:8788/pay/maya.sharma" }`
+Demo payees are seeded: `@himalayan` (9800000001), `@maya.sharma`
+(9841000002), `@sagar` (9851000003).
+
+### `GET /v1/users/lookup?username=@maya.sharma` or `?phone=9841000002`
+Name inquiry — look the payee up *before* you send, and show their name on
+the confirm screen. Returns the public profile only: the phone is masked
+(`98******02`), never the full number. Unknown user → `404 recipient_not_found`.
+
+### `GET /v1/users` and `GET /v1/users/:id`
+List / fetch payees (public profiles only).
+
+### Paying — `POST /v1/payments` with `to`, `recipientUsername` or `recipientPhone`
+Body: `{ "to": "@maya.sharma", "amount": 200 }` or
+`{ "recipientPhone": "9851000003", "amount": 150 }`. No `method` needed —
+it defaults to `p2p`, a free transfer method (fee 0). The payment carries
+`recipient: { username, displayName, phoneMasked }` so the UI can show who
+was paid. Unknown recipient → `400 recipient_not_found`; no amount → `400`.
+P2P money is ledgered to the recipient's account (`user:<username>:available`),
+not the merchant's, and refunds reverse from there.
+Shareable pay link: open `/pay/@maya.sharma` in any browser — it shows the
+name first, then you enter an amount and send. Flutter SDK: `registerUser()`,
+`lookupUser()`, `listUsers()`, `payTo()`.
+
 ## `GET /v1/balances`
 `{ "balances": { "available": 390.5, "pending": 0, "feesCollected": 9.5 } }`
 Balances are computed from the ledger, not stored.

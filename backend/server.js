@@ -21,9 +21,10 @@ const db = {
   idempotency: new Map(),// key -> { status, body, paymentId }
   webhooks: [],          // delivered (mock) webhook events
   qrCodes: new Map(),    // qr_* -> QR code (static or dynamic)
+  users: new Map(),      // usr_* -> payee { username (unique), phone (unique), displayName }
 };
 
-const FEE_RATE = { nepalpay_qr: 0.019, fonepay: 0.019, npi: 0.015, connectips: 0.015, esewa: 0.02, khalti: 0.02, card: 0.025 };
+const FEE_RATE = { nepalpay_qr: 0.019, fonepay: 0.019, npi: 0.015, connectips: 0.015, esewa: 0.02, khalti: 0.02, card: 0.025, p2p: 0 };
 const METHODS = [
   { id: 'nepalpay_qr', name: 'NEPALPAY QR', type: 'qr', currency: 'NPR', feeRate: FEE_RATE.nepalpay_qr },
   { id: 'fonepay', name: 'FonePay QR', type: 'qr', currency: 'NPR', feeRate: FEE_RATE.fonepay },
@@ -32,6 +33,7 @@ const METHODS = [
   { id: 'esewa', name: 'eSewa', type: 'wallet', currency: 'NPR', feeRate: FEE_RATE.esewa },
   { id: 'khalti', name: 'Khalti', type: 'wallet', currency: 'NPR', feeRate: FEE_RATE.khalti },
   { id: 'card', name: 'Visa / Mastercard', type: 'card', currency: 'NPR', feeRate: FEE_RATE.card },
+  { id: 'p2p', name: 'Pay by Username / Phone', type: 'transfer', currency: 'NPR', feeRate: 0 },
 ];
 
 const nid = (p) => p + '_' + crypto.randomBytes(9).toString('hex');
@@ -77,6 +79,56 @@ function qrStatus(qr) {
   if (qr.status === 'active' && qr.expiresAt && Date.now() > Date.parse(qr.expiresAt)) qr.status = 'expired';
   return qr.status;
 }
+
+// ---- Payees: unique username + Nepal phone number ----
+// Username: 3-20 chars, a-z 0-9 _ . , case-insensitive, unique. Phone: Nepal
+// mobile, 10 digits starting 96/97/98 (accepts +977 / 977 prefix, spaces, dashes).
+// Lookup never returns a full phone number — only a masked one (98******01),
+// so a payer can confirm *who* they are paying before the Send unlocks.
+// V1: usernames/phones must be verified (OTP + KYC) before they can receive
+// real money; in this sandbox anyone can register a demo payee.
+const RESERVED_USERNAMES = new Set(['admin', 'neppay', 'support', 'help', 'official', 'bank', 'nchl', 'fonepay', 'system', 'root', 'gateway']);
+function normalizePhone(raw) {
+  let s = String(raw || '').replace(/[\s\-()]/g, '');
+  if (s.startsWith('+')) s = s.slice(1);
+  if (s.startsWith('977') && s.length === 13) s = s.slice(3);
+  return s;
+}
+function isValidPhone(s) { return /^9[678]\d{8}$/.test(s); }
+function maskPhone(s) { return s.slice(0, 2) + '******' + s.slice(-2); }
+function publicUser(u) {
+  return { id: u.id, username: u.username, displayName: u.displayName, phoneMasked: maskPhone(u.phone), payLink: `http://localhost:${PORT}/pay/${u.username}`, createdAt: u.createdAt };
+}
+function findUserByUsername(name) {
+  const u = String(name || '').replace(/^@/, '').toLowerCase();
+  return [...db.users.values()].find((x) => x.username === u) || null;
+}
+function findUserByPhone(raw) {
+  const p = normalizePhone(raw);
+  return [...db.users.values()].find((x) => x.phone === p) || null;
+}
+function resolveRecipient(body) {
+  if (body.recipientUsername || body.toUsername) {
+    const u = findUserByUsername(body.recipientUsername || body.toUsername);
+    return u ? { user: u } : { error: { code: 'recipient_not_found', message: 'No user with that username.' } };
+  }
+  if (body.recipientPhone || body.toPhone) {
+    const u = findUserByPhone(body.recipientPhone || body.toPhone);
+    return u ? { user: u } : { error: { code: 'recipient_not_found', message: 'No user with that phone number.' } };
+  }
+  if (body.to) {
+    const t = String(body.to).trim();
+    const u = /^\d/.test(t) ? findUserByPhone(t) : findUserByUsername(t);
+    return u ? { user: u } : { error: { code: 'recipient_not_found', message: 'No user with that username or phone number.' } };
+  }
+  return { user: null };
+}
+// Demo payees (sandbox only — not real people / numbers)
+for (const [id, username, displayName, phone] of [
+  ['usr_himalayan', 'himalayan', 'Himalayan Store', '9800000001'],
+  ['usr_maya', 'maya.sharma', 'Maya Sharma', '9841000002'],
+  ['usr_sagar', 'sagar', 'Sagar Thapa', '9851000003'],
+]) db.users.set(id, { id, username, displayName, phone, createdAt: now() });
 
 function ledgerEntry({ txnId, account, debit = 0, credit = 0, memo }) {
   const e = { id: nid('le'), txnId, account, debit: paisa(debit), credit: paisa(credit), currency: 'NPR', memo, createdAt: now() };
@@ -155,6 +207,15 @@ const server = http.createServer(async (req, res) => {
     return res.end(qrHtml(qr));
   }
 
+  // Pay link — shareable: /pay/@username  (name shown first, then you pay)
+  if (path.startsWith('/pay/')) {
+    const name = decodeURIComponent(path.split('/')[2] || '');
+    const user = findUserByUsername(name);
+    if (!user) { res.writeHead(404, { 'Content-Type': 'text/html' }); return res.end('<h1>No user with that username</h1>'); }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    return res.end(payHtml(user));
+  }
+
   // All /v1/* below need an API key (demo key in README / .env.example)
   if (path.startsWith('/v1/') && !authed(req)) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or invalid X-API-Key. Use pk_test_neppay_demo for sandbox.' } });
 
@@ -227,11 +288,51 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, qr);
   }
 
+  // POST /v1/users — register a payee (unique username + unique phone)
+  if (req.method === 'POST' && path === '/v1/users') {
+    const username = String(body.username || '').replace(/^@/, '').toLowerCase();
+    const phone = normalizePhone(body.phone);
+    if (!/^[a-z0-9_\\.]{3,20}$/.test(username) || username.startsWith('.') || username.endsWith('.') || username.startsWith('_')) return send(res, 400, { error: { code: 'invalid_username', message: 'Username must be 3-20 chars: a-z, 0-9, _ and . only.' } });
+    if (RESERVED_USERNAMES.has(username)) return send(res, 400, { error: { code: 'username_reserved', message: 'That username is reserved.' } });
+    if (!body.displayName || String(body.displayName).trim().length < 2) return send(res, 400, { error: { code: 'invalid_name', message: 'displayName (2+ chars) is required.' } });
+    if (!isValidPhone(phone)) return send(res, 400, { error: { code: 'invalid_phone', message: 'Phone must be a Nepal mobile number, e.g. 98XXXXXXXX or +97798XXXXXXXX.' } });
+    if (findUserByUsername(username)) return send(res, 409, { error: { code: 'duplicate_username', message: 'That username is already taken.' } });
+    if (findUserByPhone(phone)) return send(res, 409, { error: { code: 'duplicate_phone', message: 'That phone number is already registered.' } });
+    const u = { id: nid('usr'), username, displayName: String(body.displayName).trim().slice(0, 50), phone, createdAt: now() };
+    db.users.set(u.id, u);
+    return send(res, 201, publicUser(u));
+  }
+
+  // GET /v1/users/lookup?username=@maya.sharma  or  ?phone=9841000002
+  // Name inquiry: confirm who you are paying BEFORE you send.
+  if (req.method === 'GET' && path === '/v1/users/lookup') {
+    const found = u.searchParams.get('username') ? findUserByUsername(u.searchParams.get('username'))
+      : u.searchParams.get('phone') ? findUserByPhone(u.searchParams.get('phone')) : null;
+    if (!found) return send(res, 404, { error: { code: 'recipient_not_found', message: 'No user with that username or phone number.' } });
+    return send(res, 200, publicUser(found));
+  }
+
+  // GET /v1/users  |  GET /v1/users/:id
+  if (req.method === 'GET' && path.startsWith('/v1/users')) {
+    const id = path.split('/')[3];
+    if (id) { const u = db.users.get(id); return u ? send(res, 200, publicUser(u)) : send(res, 404, { error: { code: 'not_found', message: 'User not found' } }); }
+    return send(res, 200, { users: [...db.users.values()].map(publicUser) });
+  }
+
   // POST /v1/payments  (idempotent — same Idempotency-Key returns the original payment)
   if (req.method === 'POST' && path === '/v1/payments') {
     const key = req.headers['idempotency-key'];
     if (!key) return send(res, 400, { error: { code: 'idempotency_key_required', message: 'Send an Idempotency-Key header — a retry with the same key never charges twice.' } });
     if (db.idempotency.has(key)) { const hit = db.idempotency.get(key); return send(res, hit.status, db.payments.get(hit.paymentId)); }
+    // Pay by username / phone: resolve the recipient first (name inquiry).
+    // No method needed — defaults to p2p (free). Any other method is allowed too.
+    let recipient = null;
+    if (body.recipientUsername || body.recipientPhone || body.toUsername || body.toPhone || body.to) {
+      const r = resolveRecipient(body);
+      if (r.error) return send(res, 400, { error: r.error });
+      recipient = r.user;
+      if (!body.method) body.method = 'p2p';
+    }
     // QR pay: resolve method + amount from the scanned QR code.
     let qr = null;
     if (body.qrCodeId) {
@@ -247,8 +348,8 @@ const server = http.createServer(async (req, res) => {
     if (!METHODS.some((m) => m.id === method)) return send(res, 400, { error: { code: 'invalid_method', message: `method must be one of: ${METHODS.map((m) => m.id).join(', ')}` } });
     const amount = body.checkoutSessionId ? (db.sessions.get(body.checkoutSessionId) || {}).amount : body.amount;
     if (!amount || amount <= 0) return send(res, 400, { error: { code: 'invalid_amount', message: 'amount or a valid checkoutSessionId is required (static QR: customer enters the amount)' } });
-    const fee = paisa(amount * (FEE_RATE[method] || 0.02));
-    const p = { id: nid('pay'), object: 'payment', checkoutSessionId: body.checkoutSessionId || null, qrCodeId: qr ? qr.id : null, orderId: body.orderId || null, method, amount: paisa(amount), fee, net: paisa(amount - fee), currency: 'NPR', status: 'processing', cardLast4: body.cardLast4 || null, createdAt: now() };
+    const fee = paisa(amount * (FEE_RATE[method] ?? 0.02)); // ?? not || — p2p fee is 0, and 0 is falsy
+    const p = { id: nid('pay'), object: 'payment', checkoutSessionId: body.checkoutSessionId || null, qrCodeId: qr ? qr.id : null, recipient: recipient ? { username: recipient.username, displayName: recipient.displayName, phoneMasked: maskPhone(recipient.phone) } : null, orderId: body.orderId || null, method, amount: paisa(amount), fee, net: paisa(amount - fee), currency: 'NPR', status: 'processing', cardLast4: body.cardLast4 || null, createdAt: now() };
     db.payments.set(p.id, p);
     db.idempotency.set(key, { status: 201, paymentId: p.id });
     const result = await adapters.charge(method, p);
@@ -256,11 +357,16 @@ const server = http.createServer(async (req, res) => {
     p.status = 'succeeded'; p.adapterRef = result.adapterRef; p.authCode = result.authCode;
     if (qr) { qr.paymentsCount += 1; qr.paymentId = p.id; if (qr.type === 'dynamic') qr.status = 'paid'; }
     // Double-entry ledger: customer clearing -> merchant pending -> merchant available (minus fee)
+    // For a username/phone (p2p) payment the money goes to the recipient user, not the demo merchant.
     ledgerEntry({ txnId: p.id, account: 'gateway:clearing', debit: p.amount, memo: `charge ${p.id}` });
-    ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:pending', credit: p.amount, memo: `charge ${p.id}` });
-    ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:pending', debit: p.amount, memo: `settle ${p.id}` });
-    ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:available', credit: p.net, memo: `settle ${p.id}` });
-    ledgerEntry({ txnId: p.id, account: 'gateway:fees', credit: p.fee, memo: `fee ${p.id}` });
+    if (recipient) {
+      ledgerEntry({ txnId: p.id, account: `user:${recipient.username}:available`, credit: p.net, memo: `p2p ${p.id} to @${recipient.username}` });
+    } else {
+      ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:pending', credit: p.amount, memo: `charge ${p.id}` });
+      ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:pending', debit: p.amount, memo: `settle ${p.id}` });
+      ledgerEntry({ txnId: p.id, account: 'merchant:acct_demo:available', credit: p.net, memo: `settle ${p.id}` });
+    }
+    if (p.fee > 0) ledgerEntry({ txnId: p.id, account: 'gateway:fees', credit: p.fee, memo: `fee ${p.id}` });
     if (p.checkoutSessionId && db.sessions.has(p.checkoutSessionId)) db.sessions.get(p.checkoutSessionId).status = 'complete';
     emitWebhook('payment.succeeded', p);
     return send(res, 201, p);
@@ -283,7 +389,8 @@ const server = http.createServer(async (req, res) => {
     const r = { id: nid('re'), object: 'refund', paymentId: p.id, amount, currency: 'NPR', status: 'succeeded', createdAt: now() };
     const rr = await adapters.refund(p.method, p, amount);
     r.adapterRef = rr.adapterRef;
-    ledgerEntry({ txnId: r.id, account: 'merchant:acct_demo:available', debit: amount, memo: `refund ${r.id}` });
+    const refundAccount = p.recipient ? `user:${p.recipient.username}:available` : 'merchant:acct_demo:available';
+    ledgerEntry({ txnId: r.id, account: refundAccount, debit: amount, memo: `refund ${r.id}` });
     ledgerEntry({ txnId: r.id, account: 'gateway:clearing', credit: amount, memo: `refund ${r.id}` });
     db.refunds.set(r.id, r); emitWebhook('refund.succeeded', r);
     return send(res, 201, r);
@@ -309,6 +416,11 @@ function qrHtml(qr) {
     : `<p>Static QR — no amount in the code. Enter an amount to pay:</p><input id="amt" type="number" min="1" step="0.01" placeholder="Amount in NPR" style="padding:10px;width:100%;font-size:16px">`;
   const canPay = qr.status === 'active';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${qr.merchantName} — NepPay QR</title><style>body{font-family:system-ui;max-width:480px;margin:40px auto;padding:0 16px;text-align:center}img{max-width:320px;width:100%}button{width:100%;margin-top:12px;padding:14px;font-size:16px;cursor:pointer}code{word-break:break-all;font-size:12px;text-align:left;display:block;background:#f4f4f4;padding:10px}#out{white-space:pre-wrap;background:#f4f4f4;padding:12px;margin-top:16px;text-align:left}</style></head><body><h2>${qr.merchantName}</h2><p>${qr.merchantCity} · ${qr.scheme === 'fonepay' ? 'FonePay' : 'NEPALPAY'} QR · ${qr.type} · <b>${qr.status}</b>${qr.expiresAt ? '<br>Expires: ' + qr.expiresAt : ''}</p><img src="${qr.qrImageUrl}" alt="QR code"><p>Scan with any EMVCo QR app, or pay below (sandbox — no real money).</p>${amountLine}${canPay ? `<button onclick="pay()">Pay with ${qr.scheme === 'fonepay' ? 'FonePay' : 'NEPALPAY'} QR</button>` : `<p>This QR can no longer be paid.</p>`}<div id="out"></div><details><summary>EMVCo payload</summary><code>${qr.payload}</code></details><script>async function pay(){const amt=document.getElementById('amt');const body={qrCodeId:'${qr.id}'};if(amt&&amt.value)body.amount=Number(amt.value);const r=await fetch('/v1/payments',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':'pk_test_neppay_demo','Idempotency-Key':'qr-'+Date.now()},body:JSON.stringify(body)});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2);}</script></body></html>`;
+}
+
+function payHtml(user) {
+  const pub = publicUser(user);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pay @${pub.username} — NepPay Gateway</title><style>body{font-family:system-ui;max-width:480px;margin:40px auto;padding:0 16px;text-align:center}input{padding:12px;width:100%;font-size:16px;box-sizing:border-box}button{width:100%;margin-top:12px;padding:14px;font-size:16px;cursor:pointer}#out{white-space:pre-wrap;background:#f4f4f4;padding:12px;margin-top:16px;text-align:left}</style></head><body><h2>Pay @${pub.username}</h2><p><b>${pub.displayName}</b><br>${pub.phoneMasked} · NepPay Gateway (sandbox — no real money)</p><input id="amt" type="number" min="1" step="0.01" placeholder="Amount in NPR"><button onclick="pay()">Send NPR</button><div id="out">Enter an amount — the name above is who you are paying. Check it before you send.</div><script>async function pay(){const amt=document.getElementById('amt').value;if(!amt){document.getElementById('out').textContent='Enter an amount first.';return;}const r=await fetch('/v1/payments',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':'pk_test_neppay_demo','Idempotency-Key':'paylink-'+Date.now()},body:JSON.stringify({to:'@${pub.username}',amount:Number(amt)})});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2);}</script></body></html>`;
 }
 
 server.listen(PORT, () => console.log(`NepPay Gateway sandbox on http://localhost:${PORT}  (health: /health, methods: /v1/methods)`));
