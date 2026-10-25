@@ -96,6 +96,64 @@ class NepPayGatewayClient {
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
+  /// Create a QR code. Static: no amount (customer enters it).
+  /// Dynamic: amount is embedded in the EMVCo payload and the QR is single-use.
+  Future<Map<String, dynamic>> createQrCode({
+    required String type, // 'static' | 'dynamic'
+    String scheme = 'nepalpay_qr', // 'nepalpay_qr' | 'fonepay'
+    double? amount,
+    String? orderId,
+    String? merchantName,
+    String? merchantCity,
+    int? expiresInMinutes,
+  }) async {
+    final r = await http.post(
+      Uri.parse('$baseUrl/v1/qr-codes'),
+      headers: _headers,
+      body: jsonEncode({
+        'type': type,
+        'scheme': scheme,
+        if (amount != null) 'amount': amount,
+        if (orderId != null) 'orderId': orderId,
+        if (merchantName != null) 'merchantName': merchantName,
+        if (merchantCity != null) 'merchantCity': merchantCity,
+        if (expiresInMinutes != null) 'expiresInMinutes': expiresInMinutes,
+      }),
+    );
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getQrCode(String id) async {
+    final r = await http.get(Uri.parse('$baseUrl/v1/qr-codes/$id'), headers: _headers);
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  Future<List<dynamic>> listQrCodes({String? type, String? status}) async {
+    final q = [if (type != null) 'type=$type', if (status != null) 'status=$status'].join('&');
+    final r = await http.get(Uri.parse('$baseUrl/v1/qr-codes${q.isEmpty ? '' : '?$q'}'), headers: _headers);
+    _throwIfError(r);
+    return (jsonDecode(r.body) as Map<String, dynamic>)['qrCodes'] as List;
+  }
+
+  Future<Map<String, dynamic>> deactivateQrCode(String id) async {
+    final r = await http.post(Uri.parse('$baseUrl/v1/qr-codes/$id/deactivate'), headers: _headers, body: '{}');
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
+  /// Pay a scanned QR. Dynamic: amount comes from the QR. Static: pass amount.
+  Future<Map<String, dynamic>> payWithQr({required String qrCodeId, double? amount, String? idempotencyKey}) async {
+    final r = await http.post(
+      Uri.parse('$baseUrl/v1/payments'),
+      headers: {..._headers, 'Idempotency-Key': idempotencyKey ?? _newIdempotencyKey()},
+      body: jsonEncode({'qrCodeId': qrCodeId, if (amount != null) 'amount': amount}),
+    );
+    _throwIfError(r);
+    return jsonDecode(r.body) as Map<String, dynamic>;
+  }
+
   void _throwIfError(http.Response r) {
     if (r.statusCode >= 400) {
       final b = jsonDecode(r.body) as Map<String, dynamic>;

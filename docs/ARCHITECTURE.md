@@ -35,6 +35,14 @@ Merchant website / Android / iOS / Flutter app
    `{ ok, adapterRef }` / `{ ok:false, code, message }` shape.
 4. **Webhooks are signed.** Every event carries `sha256=` HMAC of the payload
    with `WEBHOOK_SECRET`. Merchants must verify it before trusting an event.
+5. **QR codes are EMVCo, not pictures.** `POST /v1/qr-codes` builds a TLV
+   payload (`buildEmvPayload` in `backend/server.js`, CRC16-CCITT in tag 63)
+   that any EMVCo reader — including the NepPay app's `EmvQr.tryParse` —
+   can parse. The image is just a rendering of that payload
+   (`qrImageUrl`, via an external QR-image service in V0; use a local QR
+   library in V1). Static = tag 01 `11`, no amount, reusable until
+   deactivated. Dynamic = tag 01 `12`, amount in tag 54, single-use, expires
+   (default 15 min) and flips to `paid` after one successful payment.
 5. **No real money in V0.** Mock adapters simulate success/failure only.
    Amount `1313` always fails; card ending `0002` always declines — so
    merchants can test unhappy paths deterministically.

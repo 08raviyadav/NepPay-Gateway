@@ -50,12 +50,37 @@ curl -X POST localhost:8788/v1/payments \
 curl localhost:8788/v1/balances -H 'X-API-Key: pk_test_neppay_demo'
 ```
 
+## QR payments — static + dynamic
+
+```bash
+# Static QR: one fixed merchant QR, customer enters the amount (reusable)
+curl -X POST localhost:8788/v1/qr-codes \
+  -H 'X-API-Key: pk_test_neppay_demo' -H 'Content-Type: application/json' \
+  -d '{"type":"static","scheme":"nepalpay_qr"}'
+# Dynamic QR: amount embedded, single-use, expires in 15 min by default
+curl -X POST localhost:8788/v1/qr-codes \
+  -H 'X-API-Key: pk_test_neppay_demo' -H 'Content-Type: application/json' \
+  -d '{"type":"dynamic","scheme":"fonepay","amount":250,"orderId":"ORDER-QR-1"}'
+# Open the returned displayUrl (/qr/qr_…) to see the QR and pay from the page,
+# or pay it directly (amount comes from the QR for dynamic, enter it for static):
+curl -X POST localhost:8788/v1/payments \
+  -H 'X-API-Key: pk_test_neppay_demo' -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: qr-demo-001' \
+  -d '{"qrCodeId":"qr_…","amount":100}'
+```
+
+Each QR returns a real EMVCo TLV payload (tag 01 = `11` static / `12` dynamic,
+CRC16 in tag 63) — the same format the NepPay app parses. Flutter SDK:
+`createQrCode()`, `getQrCode()`, `listQrCodes()`, `payWithQr()`.
+
 ## Test cards / failure cases
 
 - Amount `1313` always fails (mock `insufficient_funds`) — test your error UI.
 - Card with `cardLast4: "0002"` always declines.
 - Re-send any payment with the same `Idempotency-Key` — you get the original
   payment back, never a second charge.
+- A dynamic QR pays once, then a second pay is rejected; a static QR stays
+  active until you deactivate it.
 
 ## Cross-platform
 

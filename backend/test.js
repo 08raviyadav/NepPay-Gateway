@@ -29,6 +29,34 @@ async function j(method, path, body, headers = {}) {
   check('balances reflect net minus refund', bal.body.balances.available === p1.body.net - 100, JSON.stringify(bal.body));
   const wh = await j('GET', '/v1/webhook-events');
   check('webhook events logged with signature', (wh.body.events || []).some((e) => e.signature && e.signature.startsWith('sha256=')), JSON.stringify(wh.body));
+
+  // --- QR codes: static + dynamic (EMVCo) ---
+  function crc16(s) { let c = 0xffff; for (let i = 0; i < s.length; i++) { c ^= s.charCodeAt(i) << 8; for (let k = 0; k < 8; k++) c = (c & 0x8000) ? ((c << 1) ^ 0x1021) & 0xffff : (c << 1) & 0xffff; } return c.toString(16).toUpperCase().padStart(4, '0'); }
+  function tlv(s) { const o = {}; let i = 0; while (i + 4 <= s.length) { const t = s.slice(i, i + 2), l = parseInt(s.slice(i + 2, i + 4), 10); if (i + 4 + l > s.length) break; o[t] = s.slice(i + 4, i + 4 + l); i += 4 + l; } return o; }
+  function validEmv(payload) { const root = tlv(payload); return root['00'] === '01' && payload.slice(-4) === crc16(payload.slice(0, -4)); }
+  const sq = await j('POST', '/v1/qr-codes', { type: 'static', scheme: 'nepalpay_qr' });
+  check('static QR created, no amount, valid EMVCo+CRC', sq.status === 201 && sq.body.amount === null && sq.body.expiresAt === null && validEmv(sq.body.payload) && tlv(sq.body.payload)['01'] === '11' && !('54' in tlv(sq.body.payload)) && sq.body.payload.toLowerCase().includes('nepalpay') && sq.body.displayUrl.includes('/qr/'), JSON.stringify(sq.body));
+  const dq = await j('POST', '/v1/qr-codes', { type: 'dynamic', scheme: 'fonepay', amount: 250, orderId: 'ORDER-QR-1' });
+  check('dynamic QR created, amount embedded, expires', dq.status === 201 && dq.body.amount === 250 && tlv(dq.body.payload)['01'] === '12' && tlv(dq.body.payload)['54'] === '250.00' && !!dq.body.expiresAt && validEmv(dq.body.payload), JSON.stringify(dq.body));
+  const dqNoAmt = await j('POST', '/v1/qr-codes', { type: 'dynamic', scheme: 'nepalpay_qr' });
+  check('dynamic QR without amount rejected', dqNoAmt.status === 400, JSON.stringify(dqNoAmt.body));
+  const sqAmt = await j('POST', '/v1/qr-codes', { type: 'static', amount: 100 });
+  check('static QR with amount rejected', sqAmt.status === 400, JSON.stringify(sqAmt.body));
+  const qp1 = await j('POST', '/v1/payments', { qrCodeId: dq.body.id }, { 'Idempotency-Key': 'test-qr-dyn-' + Date.now() });
+  check('dynamic QR paid (amount from QR, single-use)', qp1.body.status === 'succeeded' && qp1.body.amount === 250 && qp1.body.qrCodeId === dq.body.id, JSON.stringify(qp1.body));
+  const qp2 = await j('POST', '/v1/payments', { qrCodeId: dq.body.id }, { 'Idempotency-Key': 'test-qr-dyn2-' + Date.now() });
+  check('dynamic QR cannot be paid twice', qp2.status === 400 && qp2.body.error.code === 'qr_not_active', JSON.stringify(qp2.body));
+  const qs1 = await j('POST', '/v1/payments', { qrCodeId: sq.body.id, amount: 100 }, { 'Idempotency-Key': 'test-qr-st1-' + Date.now() });
+  const qs2 = await j('POST', '/v1/payments', { qrCodeId: sq.body.id, amount: 50 }, { 'Idempotency-Key': 'test-qr-st2-' + Date.now() });
+  check('static QR reusable with customer-entered amounts', qs1.body.status === 'succeeded' && qs1.body.amount === 100 && qs2.body.status === 'succeeded' && qs2.body.amount === 50, JSON.stringify({ qs1: qs1.body, qs2: qs2.body }));
+  const sqGet = await j('GET', `/v1/qr-codes/${sq.body.id}`);
+  check('static QR shows 2 payments, still active', sqGet.body.paymentsCount === 2 && sqGet.body.status === 'active', JSON.stringify(sqGet.body));
+  const page = await fetch(BASE + `/qr/${sq.body.id}`);
+  check('QR display page renders', page.status === 200 && (await page.text()).includes('Himalayan Store'));
+  const deact = await j('POST', `/v1/qr-codes/${sq.body.id}/deactivate`, {});
+  check('static QR deactivated', deact.body.status === 'deactivated', JSON.stringify(deact.body));
+  const qp3 = await j('POST', '/v1/payments', { qrCodeId: sq.body.id, amount: 10 }, { 'Idempotency-Key': 'test-qr-st3-' + Date.now() });
+  check('deactivated QR cannot be paid', qp3.status === 400, JSON.stringify(qp3.body));
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('FAIL test crashed', e); process.exit(1); });
